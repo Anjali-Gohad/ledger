@@ -18,6 +18,10 @@ until you try to use it and get a broken-pipe error mid-request.
 This trades a tiny bit of latency (per checkout) for not surfacing
 stale-connection errors to callers.
 """
+"""
+DB engine + session factory. One pool, created once at import time,
+shared by every request and (later) every worker process.
+"""
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -38,12 +42,10 @@ engine = create_async_engine(
 
 AsyncSessionLocal = async_sessionmaker(
     bind=engine,
-    expire_on_commit=False,  # we often read attributes after commit (e.g. job.id in the response)
     autoflush=False,
 )
 
 
 async def get_db():
-    """FastAPI dependency: one session per request, always closed."""
     async with AsyncSessionLocal() as session:
         yield session

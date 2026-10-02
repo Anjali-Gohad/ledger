@@ -5,6 +5,13 @@ Revises:
 Create Date: 2026-09-28
 
 """
+"""initial schema: jobs, job_events, outbox
+
+Revision ID: 0001
+Revises:
+Create Date: 2026-09-28
+
+"""
 from typing import Sequence, Union
 
 import sqlalchemy as sa
@@ -18,11 +25,16 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    # create_type=False on these two: we create the Postgres ENUM types
+    # explicitly below via .create(). Without create_type=False,
+    # SQLAlchemy ALSO tries to auto-create the same type again as a
+    # side effect of op.create_table() below, and Postgres correctly
+    # rejects the duplicate CREATE TYPE.
     job_status = postgresql.ENUM(
         "queued", "running", "completed", "failed", "dead_letter", "cancelled",
-        name="job_status",
+        name="job_status", create_type=False,
     )
-    job_priority = postgresql.ENUM("high", "medium", "low", name="job_priority")
+    job_priority = postgresql.ENUM("high", "medium", "low", name="job_priority", create_type=False)
     job_status.create(op.get_bind(), checkfirst=True)
     job_priority.create(op.get_bind(), checkfirst=True)
 
@@ -33,11 +45,6 @@ def upgrade() -> None:
         sa.Column("priority", job_priority, nullable=False, server_default="medium"),
         sa.Column("payload", postgresql.JSONB, nullable=False),
         sa.Column("payload_location", sa.String(), nullable=True),
-        # THE idempotency guarantee: DB-enforced UNIQUE, not app-level
-        # check-then-insert. Two concurrent inserts with the same key
-        # race at the DB level and Postgres itself rejects the loser
-        # with a unique_violation — there's no window where both can
-        # pass a check and both insert.
         sa.Column("idempotency_key", sa.String(), nullable=False),
         sa.Column("attempts", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("max_attempts", sa.Integer(), nullable=False, server_default="5"),

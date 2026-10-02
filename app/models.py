@@ -12,132 +12,69 @@ Data model for the three tables that carry the correctness guarantees:
   state change or not committed at all. A separate relay process
   (Week 2) reads unpublished outbox rows and pushes them to Redis.
 """
-import enum
+"""
+ORM models: jobs (core table), job_events (audit trail),
+outbox (transactional outbox pattern, wired up in Week 2).
+"""
 import uuid
-from datetime import datetime
 
 from sqlalchemy import (
-    Boolean,
-    DateTime,
-    Enum,
-    ForeignKey,
-    Index,
-    Integer,
-    String,
-    UniqueConstraint,
-    func,
+    Boolean, Column, DateTime, Enum, ForeignKey, Integer, String, func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase
 
 
 class Base(DeclarativeBase):
     pass
 
 
-class JobStatus(str, enum.Enum):
-    queued = "queued"
-    running = "running"
-    completed = "completed"
-    failed = "failed"
-    dead_letter = "dead_letter"
-    cancelled = "cancelled"
-
-
-class JobPriority(str, enum.Enum):
-    high = "high"
-    medium = "medium"
-    low = "low"
-
-
 class Job(Base):
     __tablename__ = "jobs"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    status = Column(
+        Enum("queued", "running", "completed", "failed", "dead_letter", "cancelled",
+             name="job_status"),
+        nullable=False, server_default="queued",
     )
-    status: Mapped[JobStatus] = mapped_column(
-        Enum(JobStatus, name="job_status"), nullable=False, default=JobStatus.queued
+    priority = Column(
+        Enum("high", "medium", "low", name="job_priority"),
+        nullable=False, server_default="medium",
     )
-    priority: Mapped[JobPriority] = mapped_column(
-        Enum(JobPriority, name="job_priority"), nullable=False, default=JobPriority.medium
-    )
-    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
-    # Set once the payload is offloaded to S3/MinIO (Week 4 claim-check
-    # pattern). NULL means the payload above is the real, inline payload.
-    payload_location: Mapped[str | None] = mapped_column(String, nullable=True)
-
-    # THE core idempotency guarantee. This is a DB-level UNIQUE
-    # constraint, not an app-level check-then-insert — see the
-    # docstring in api/jobs.py for why that distinction matters.
-    idempotency_key: Mapped[str] = mapped_column(String, nullable=False, unique=True)
-
-    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
-
-    # Lock ownership for whichever worker currently holds this job.
-    locked_by: Mapped[str | None] = mapped_column(String, nullable=True)
-    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    lock_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-
-    cancel_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-
-    tenant_id: Mapped[str | None] = mapped_column(String, nullable=True)
-
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    scheduled_for: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-
-    __table_args__ = (
-        # Fast "find crashed jobs" scan: workers holding an expired
-        # lock while still marked running.
-        Index("ix_jobs_status_lock_expires", "status", "lock_expires_at"),
-        # Fast "what's due" scan for the dequeue path.
-        Index("ix_jobs_status_priority_scheduled", "status", "priority", "scheduled_for"),
-    )
+    payload = Column(JSONB, nullable=False)
+    payload_location = Column(String, nullable=True)
+    idempotency_key = Column(String, nullable=False, unique=True)
+    attempts = Column(Integer, nullable=False, server_default="0")
+    max_attempts = Column(Integer, nullable=False, server_default="5")
+    locked_by = Column(String, nullable=True)
+    locked_at = Column(DateTime(timezone=True), nullable=True)
+    lock_expires_at = Column(DateTime(timezone=True), nullable=True)
+    cancel_requested = Column(Boolean, nullable=False, server_default="false")
+    tenant_id = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    scheduled_for = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
 
 
 class JobEvent(Base):
     __tablename__ = "job_events"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    job_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False
-    )
-    event_type: Mapped[str] = mapped_column(String, nullable=False)
-    worker_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    timestamp: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    event_metadata: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
-
-    __table_args__ = (
-        Index("ix_job_events_job_id_timestamp", "job_id", "timestamp"),
-    )
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    job_id = Column(UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False)
+    event_type = Column(String, nullable=False)
+    worker_id = Column(String, nullable=True)
+    timestamp = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    event_metadata = Column(JSONB, nullable=False, server_default="{}")
 
 
 class Outbox(Base):
     __tablename__ = "outbox"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    job_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False
-    )
-    event_type: Mapped[str] = mapped_column(String, nullable=False)
-    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
-    published: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-
-    __table_args__ = (
-        # The relay's core query is "give me unpublished rows in order" —
-        # this index makes that a cheap index scan instead of a seq scan
-        # once the table has history in it.
-        Index("ix_outbox_published_created", "published", "created_at"),
-    )
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    job_id = Column(UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False)
+    event_type = Column(String, nullable=False)
+    payload = Column(JSONB, nullable=False)
+    published = Column(Boolean, nullable=False, server_default="false")
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
